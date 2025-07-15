@@ -452,6 +452,9 @@ pub mod sysvar;
 pub use mollusk_svm_result as result;
 #[cfg(any(feature = "fuzz", feature = "fuzz-fd"))]
 use mollusk_svm_result::Compare;
+use solana_instruction::error::InstructionError;
+use solana_program_runtime::{invoke_context::SerializedAccountMetadata, loaded_programs::{ProgramCacheEntry, ProgramCacheEntryOwner}, serialization::serialize_parameters, solana_sbpf::{self, memory_region::MemoryRegion}};
+use solana_transaction_context::{IndexOfAccount, InstructionAccount, InstructionContext};
 use {
     crate::{
         account_store::AccountStore, compile_accounts::CompiledAccounts, epoch_stake::EpochStake,
@@ -496,6 +499,229 @@ pub struct Mollusk {
     /// programs comes from the sysvars.
     #[cfg(feature = "fuzz-fd")]
     pub slot: u64,
+}
+
+thread_local! {
+    static CALLED_INSTRUCTIONS: RefCell<Vec<Instruction>> = RefCell::new(vec![]);
+}
+
+// Initial memory layout for an instruction without stack and heap.
+#[derive(Debug, Default)]
+pub struct AddressSpace {
+    pub regions: Vec<MemoryRegion>,
+    pub accounts: Vec<SerializedAccountMetadata>,
+    mem: Option<solana_sbpf::aligned_memory::AlignedMemory<{solana_sbpf::ebpf::HOST_ALIGN}>>,
+
+    pub text_vmaddr: u64,
+    pub text: Vec<u8>,
+
+    pub data_region: MemoryRegion,
+    pub data: Vec<u8>,
+
+    // MemoryRegions without backing memory
+    stack: MemoryRegion,
+    heap: MemoryRegion,
+}
+
+impl AddressSpace {
+    fn translate_vmaddr(&self, addr: u64, len: u64, load: Option<bool>) -> Option<u64> {
+        for r in self.regions.as_slice().iter().chain(vec![&self.stack, &self.heap].into_iter()) {
+            if let Some(addr) = r.vm_to_host(addr, len) {
+                return match load {
+                    Some(true) => Some(addr),
+                    None => Some(addr),
+                    Some(false) => { if !r.writable.get() { None } else { Some(addr) } }
+                };
+            }
+        }
+        None
+    }
+}
+
+#[derive(Debug)]
+pub struct TraceEntry {
+    pub regs: [u64; 12],
+    pub insn: solana_sbpf::ebpf::Insn,
+
+    // mem address. filled only for load/store operations
+    pub vaddr: Option<u64>
+}
+
+impl TraceEntry {
+    fn new(address_space: &AddressSpace, regs: &[u64; 12], move_memory_instruction_classes: bool) -> Self {
+        let mut insn = solana_sbpf::ebpf::get_insn_unchecked(address_space.text.as_slice(), regs[11] as usize);
+        if insn.opc == solana_sbpf::ebpf::LD_DW_IMM {
+            solana_sbpf::ebpf::augment_lddw_unchecked(address_space.text.as_slice(), &mut insn);
+        }
+
+        let src = insn.src as usize;
+        let dst = insn.dst as usize;
+
+        let mut vaddr: Option<u64> = None;
+
+        let mut try_translate_vmaddr = |vmaddr: u64, len: u64, load: bool|  {
+            assert!(address_space.translate_vmaddr(vmaddr, len, Some(load)).is_some());
+            vaddr = Some(vmaddr);
+        };
+
+        if !move_memory_instruction_classes {
+            let src_addr = (regs[src] as i64).wrapping_add(insn.off as i64) as u64;
+            let dst_addr = (regs[dst] as i64).wrapping_add(insn.off as i64) as u64;
+
+            match insn.opc {
+                solana_sbpf::ebpf::LD_B_REG => try_translate_vmaddr(src_addr, 1, true),
+                solana_sbpf::ebpf::LD_H_REG => try_translate_vmaddr(src_addr, 2, true),
+                solana_sbpf::ebpf::LD_W_REG => try_translate_vmaddr(src_addr, 4, true),
+                solana_sbpf::ebpf::LD_DW_REG => try_translate_vmaddr(src_addr, 8, true),
+
+                // BPF_ST class
+                solana_sbpf::ebpf::ST_B_IMM => try_translate_vmaddr(dst_addr, 1, false),
+                solana_sbpf::ebpf::ST_H_IMM => try_translate_vmaddr(dst_addr, 2, false),
+                solana_sbpf::ebpf::ST_W_IMM => try_translate_vmaddr(dst_addr, 4, false),
+                solana_sbpf::ebpf::ST_DW_IMM => try_translate_vmaddr(dst_addr, 8, false),
+
+                // BPF_STX class
+                solana_sbpf::ebpf::ST_B_REG => try_translate_vmaddr(dst_addr, 1, false),
+                solana_sbpf::ebpf::ST_H_REG => try_translate_vmaddr(dst_addr, 2, false),
+                solana_sbpf::ebpf::ST_W_REG => try_translate_vmaddr(dst_addr, 4, false),
+                solana_sbpf::ebpf::ST_DW_REG => try_translate_vmaddr(dst_addr, 8, false),
+
+                _ => { }
+            }
+        };
+
+        if move_memory_instruction_classes {
+            let src_addr = (regs[src] as i64).wrapping_add(insn.off as i64) as u64;
+            let dst_addr = (regs[dst] as i64).wrapping_add(insn.off as i64) as u64;
+
+            match insn.opc {
+                solana_sbpf::ebpf::LD_1B_REG => try_translate_vmaddr(src_addr, 1, false),
+                solana_sbpf::ebpf::LD_2B_REG => try_translate_vmaddr(src_addr, 2, false),
+                solana_sbpf::ebpf::LD_4B_REG => try_translate_vmaddr(src_addr, 4, false),
+                solana_sbpf::ebpf::LD_8B_REG => try_translate_vmaddr(src_addr, 8, false),
+
+                solana_sbpf::ebpf::ST_1B_IMM | solana_sbpf::ebpf::ST_1B_REG => try_translate_vmaddr(dst_addr, 1, true),
+                solana_sbpf::ebpf::ST_2B_IMM | solana_sbpf::ebpf::ST_2B_REG => try_translate_vmaddr(dst_addr, 2, true),
+                solana_sbpf::ebpf::ST_4B_IMM | solana_sbpf::ebpf::ST_4B_REG => try_translate_vmaddr(dst_addr, 4, true),
+                solana_sbpf::ebpf::ST_8B_IMM | solana_sbpf::ebpf::ST_8B_REG => try_translate_vmaddr(dst_addr, 8, true),
+
+                _ => { }
+            }
+        };
+
+        Self{ 
+            regs: *regs,
+            insn,
+            vaddr
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct InstructionTrace {
+    pub entries: Vec<Vec<TraceEntry>>,
+    pub address_space: AddressSpace,
+    pub result: InstructionResult,
+    move_memory_instruction_classes: bool
+}
+
+impl InstructionTrace {
+    pub fn new() -> Self {
+        Self {
+            entries: vec![],
+            result: InstructionResult::default(),
+            address_space: AddressSpace::default(),
+            move_memory_instruction_classes: true,
+        }
+    }
+
+    pub fn execute(mut self, mollusk: &Mollusk, instruction: &Instruction, accounts: &[(Pubkey, Account)]) -> Self {
+        let result = mollusk.process_instruction_with_tracer(instruction, accounts, Some(&mut self));
+
+        self.result.absorb(result);
+
+        self
+    }
+
+    fn prepare(&mut self,
+        instruction: &Instruction,
+        instruction_accounts: &[InstructionAccount],
+        program_indices: &[IndexOfAccount],
+        cache: &solana_program_runtime::loaded_programs::ProgramCacheForTxBatch,
+        ctx: &TransactionContext,
+        mollusk: &Mollusk) -> Result<(), InstructionError>
+    {
+        let cache_entry = cache.find(&instruction.program_id).or_panic_with(MolluskError::ProgramNotCached(&instruction.program_id));
+        let cache_entry_type = &cache_entry.program;
+        match cache_entry.account_owner {
+            ProgramCacheEntryOwner::LoaderV1
+                | ProgramCacheEntryOwner::LoaderV2
+                | ProgramCacheEntryOwner::LoaderV3
+                | ProgramCacheEntryOwner::LoaderV4 => {}
+            _ => return Err(InstructionError::UnsupportedProgramId)
+        }
+
+        let runtime_features = mollusk.feature_set.runtime_features();
+
+
+        match cache_entry_type  {
+            solana_program_runtime::loaded_programs::ProgramCacheEntryType::Loaded(ref executable) => {
+
+                let (vmaddr, text) = executable.get_text_bytes();
+                self.address_space.text_vmaddr = vmaddr;
+                self.address_space.text = text.to_vec();
+
+                let data = executable.get_ro_region();
+                assert!(data.vm_gap_shift == 63, "unexpected gap mode in elf ro region");
+                self.address_space.data = executable.get_ro_section().to_vec();
+                data.host_addr.set(self.address_space.data.as_slice().as_ptr() as u64);
+                self.address_space.data_region = data;
+
+                let heap_size = mollusk.compute_budget.heap_size as u64;
+                let stack_size = executable.get_config().stack_size() as u64;
+
+                self.address_space.heap = MemoryRegion::new_writable(&mut [], solana_sbpf::ebpf::MM_HEAP_START);
+                self.address_space.heap.len = heap_size;
+                self.address_space.heap.vm_addr_end = solana_sbpf::ebpf::MM_HEAP_START.saturating_add(heap_size);
+
+
+                self.address_space.stack = MemoryRegion::new_writable_gapped(
+                    &mut [],
+                    solana_sbpf::ebpf::MM_STACK_START,
+                    if !executable.get_sbpf_version().dynamic_stack_frames() && executable.get_config().enable_stack_frame_gaps {
+                        stack_size
+                    } else {
+                        0
+                    },
+                );
+                self.address_space.stack.len = stack_size;
+                self.address_space.stack.vm_addr_end = solana_sbpf::ebpf::MM_STACK_START.saturating_add(stack_size);
+
+                self.move_memory_instruction_classes = executable.get_sbpf_version().move_memory_instruction_classes();
+            },
+            _ => panic!("{}", MolluskError::ProgramNotCached(&instruction.program_id))
+        };
+
+        let mut ictx = InstructionContext::default();
+        ictx.configure(program_indices, instruction_accounts, &instruction.data);
+
+        let mask_out_rent_epoch_in_vm_serialization = runtime_features.mask_out_rent_epoch_in_vm_serialization;
+
+        let (serialized, regions, accounts_metadata) = serialize_parameters(ctx, &ictx, true, mask_out_rent_epoch_in_vm_serialization)?;
+        
+        self.address_space.mem = Some(serialized);
+        self.address_space.regions = regions;
+        self.address_space.accounts = accounts_metadata;
+
+        Ok(())
+    }
+
+    fn add_execution_trace(&mut self, ctx: &InvokeContext) {
+        self.entries = ctx.get_traces().iter().map(
+            |trace| trace.iter().map(|regs| TraceEntry::new(&self.address_space, regs,
+                    self.move_memory_instruction_classes))
+            .collect::<Vec<TraceEntry>>()).collect::<Vec<Vec<TraceEntry>>>()
+    }
 }
 
 impl Default for Mollusk {
@@ -630,6 +856,15 @@ impl Mollusk {
         instruction: &Instruction,
         accounts: &[(Pubkey, Account)],
     ) -> InstructionResult {
+        self.process_instruction_with_tracer(instruction, accounts, None)
+    }
+
+    fn process_instruction_with_tracer(
+        &self,
+        instruction: &Instruction,
+        accounts: &[(Pubkey, Account)],
+        trace: Option<&mut InstructionTrace>
+    ) -> InstructionResult {
         let mut compute_units_consumed = 0;
         let mut timings = ExecuteTimings::default();
 
@@ -664,6 +899,21 @@ impl Mollusk {
             };
             let runtime_features = self.feature_set.runtime_features();
             let sysvar_cache = self.sysvars.setup_sysvar_cache(accounts);
+            let trace = match trace {
+                Some(trace) => {
+                    trace.prepare(
+                        &instruction,
+                        &instruction_accounts,
+                        &[program_id_index],
+                        &program_cache,
+                        &transaction_context,
+                        &self)
+                        .unwrap();
+                    Some(trace)
+                },
+                None => None
+            };
+
             let mut invoke_context = InvokeContext::new(
                 &mut transaction_context,
                 &mut program_cache,
@@ -678,7 +928,8 @@ impl Mollusk {
                 self.compute_budget.to_budget(),
                 self.compute_budget.to_cost(),
             );
-            if invoke_context.is_precompile(&instruction.program_id) {
+
+            let result = if invoke_context.is_precompile(&instruction.program_id) {
                 invoke_context.process_precompile(
                     &instruction.program_id,
                     &instruction.data,
@@ -694,7 +945,14 @@ impl Mollusk {
                     &mut compute_units_consumed,
                     &mut timings,
                 )
-            }
+            };
+
+            match trace {
+                Some(trace) => trace.add_execution_trace(&invoke_context),
+                None => {}
+            };
+
+            result
         };
 
         let return_data = transaction_context.get_return_data().1.to_vec();
@@ -1161,6 +1419,7 @@ impl<AS: AccountStore> MolluskContext<AS> {
             raw_result,
             return_data,
             resulting_accounts,
+            ..
         } = result;
 
         let mut store = self.account_store.borrow_mut();

@@ -4,7 +4,7 @@ use {
     agave_feature_set::FeatureSet,
     solana_account::Account,
     solana_bpf_loader_program::syscalls::create_program_runtime_environment_v1,
-    solana_compute_budget::compute_budget::ComputeBudget,
+    solana_compute_budget::compute_budget::{ComputeBudget, SVMTransactionExecutionBudget},
     solana_loader_v3_interface::state::UpgradeableLoaderState,
     solana_loader_v4_interface::state::{LoaderV4State, LoaderV4Status},
     solana_program_runtime::{
@@ -107,7 +107,8 @@ impl ProgramCache {
         // This might look rough, but it's actually functionally the same as
         // calling `create_program_runtime_environment_v1` on every addition.
         let environment = {
-            let config = self.program_runtime_environment.get_config().clone();
+            let mut config = self.program_runtime_environment.get_config().clone();
+            config.enable_instruction_tracing = true;
             let mut loader = BuiltinProgram::new_loader(config);
 
             for (_key, (name, value)) in self
