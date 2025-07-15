@@ -1,0 +1,18 @@
+[package]
+name = "runner"
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+license-file.workspace = true
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+mollusk-svm-bencher = { workspace = true }
+mollusk-svm = { workspace = true, features = ["serde"] }
+mollusk-svm-result = { workspace = true }
+solana-sdk = "2.3.1"
+solana-program-runtime = {workspace = true}
+solana-logger = {workspace = true}
+solana-compute-budget = {workspace = true}
+agave-feature-set = {workspace = true}
