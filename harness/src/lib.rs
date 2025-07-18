@@ -559,7 +559,7 @@ impl TraceEntry {
 
         let mut vaddr: Option<u64> = None;
 
-        let mut try_translate_vmaddr = |vmaddr: u64, len: u64, load: bool|  {
+        let mut fill_memory_access = |vmaddr: u64, len: u64, load: bool|  {
             assert!(address_space.translate_vmaddr(vmaddr, len, Some(load)).is_some());
             vaddr = Some(vmaddr);
         };
@@ -569,22 +569,22 @@ impl TraceEntry {
             let dst_addr = (regs[dst] as i64).wrapping_add(insn.off as i64) as u64;
 
             match insn.opc {
-                solana_sbpf::ebpf::LD_B_REG => try_translate_vmaddr(src_addr, 1, true),
-                solana_sbpf::ebpf::LD_H_REG => try_translate_vmaddr(src_addr, 2, true),
-                solana_sbpf::ebpf::LD_W_REG => try_translate_vmaddr(src_addr, 4, true),
-                solana_sbpf::ebpf::LD_DW_REG => try_translate_vmaddr(src_addr, 8, true),
+                solana_sbpf::ebpf::LD_B_REG => fill_memory_access(src_addr, 1, true),
+                solana_sbpf::ebpf::LD_H_REG => fill_memory_access(src_addr, 2, true),
+                solana_sbpf::ebpf::LD_W_REG => fill_memory_access(src_addr, 4, true),
+                solana_sbpf::ebpf::LD_DW_REG => fill_memory_access(src_addr, 8, true),
 
                 // BPF_ST class
-                solana_sbpf::ebpf::ST_B_IMM => try_translate_vmaddr(dst_addr, 1, false),
-                solana_sbpf::ebpf::ST_H_IMM => try_translate_vmaddr(dst_addr, 2, false),
-                solana_sbpf::ebpf::ST_W_IMM => try_translate_vmaddr(dst_addr, 4, false),
-                solana_sbpf::ebpf::ST_DW_IMM => try_translate_vmaddr(dst_addr, 8, false),
+                solana_sbpf::ebpf::ST_B_IMM => fill_memory_access(dst_addr, 1, false),
+                solana_sbpf::ebpf::ST_H_IMM => fill_memory_access(dst_addr, 2, false),
+                solana_sbpf::ebpf::ST_W_IMM => fill_memory_access(dst_addr, 4, false),
+                solana_sbpf::ebpf::ST_DW_IMM => fill_memory_access(dst_addr, 8, false),
 
                 // BPF_STX class
-                solana_sbpf::ebpf::ST_B_REG => try_translate_vmaddr(dst_addr, 1, false),
-                solana_sbpf::ebpf::ST_H_REG => try_translate_vmaddr(dst_addr, 2, false),
-                solana_sbpf::ebpf::ST_W_REG => try_translate_vmaddr(dst_addr, 4, false),
-                solana_sbpf::ebpf::ST_DW_REG => try_translate_vmaddr(dst_addr, 8, false),
+                solana_sbpf::ebpf::ST_B_REG => fill_memory_access(dst_addr, 1, false),
+                solana_sbpf::ebpf::ST_H_REG => fill_memory_access(dst_addr, 2, false),
+                solana_sbpf::ebpf::ST_W_REG => fill_memory_access(dst_addr, 4, false),
+                solana_sbpf::ebpf::ST_DW_REG => fill_memory_access(dst_addr, 8, false),
 
                 _ => { }
             }
@@ -595,15 +595,15 @@ impl TraceEntry {
             let dst_addr = (regs[dst] as i64).wrapping_add(insn.off as i64) as u64;
 
             match insn.opc {
-                solana_sbpf::ebpf::LD_1B_REG => try_translate_vmaddr(src_addr, 1, false),
-                solana_sbpf::ebpf::LD_2B_REG => try_translate_vmaddr(src_addr, 2, false),
-                solana_sbpf::ebpf::LD_4B_REG => try_translate_vmaddr(src_addr, 4, false),
-                solana_sbpf::ebpf::LD_8B_REG => try_translate_vmaddr(src_addr, 8, false),
+                solana_sbpf::ebpf::LD_1B_REG => fill_memory_access(src_addr, 1, false),
+                solana_sbpf::ebpf::LD_2B_REG => fill_memory_access(src_addr, 2, false),
+                solana_sbpf::ebpf::LD_4B_REG => fill_memory_access(src_addr, 4, false),
+                solana_sbpf::ebpf::LD_8B_REG => fill_memory_access(src_addr, 8, false),
 
-                solana_sbpf::ebpf::ST_1B_IMM | solana_sbpf::ebpf::ST_1B_REG => try_translate_vmaddr(dst_addr, 1, true),
-                solana_sbpf::ebpf::ST_2B_IMM | solana_sbpf::ebpf::ST_2B_REG => try_translate_vmaddr(dst_addr, 2, true),
-                solana_sbpf::ebpf::ST_4B_IMM | solana_sbpf::ebpf::ST_4B_REG => try_translate_vmaddr(dst_addr, 4, true),
-                solana_sbpf::ebpf::ST_8B_IMM | solana_sbpf::ebpf::ST_8B_REG => try_translate_vmaddr(dst_addr, 8, true),
+                solana_sbpf::ebpf::ST_1B_IMM | solana_sbpf::ebpf::ST_1B_REG => fill_memory_access(dst_addr, 1, true),
+                solana_sbpf::ebpf::ST_2B_IMM | solana_sbpf::ebpf::ST_2B_REG => fill_memory_access(dst_addr, 2, true),
+                solana_sbpf::ebpf::ST_4B_IMM | solana_sbpf::ebpf::ST_4B_REG => fill_memory_access(dst_addr, 4, true),
+                solana_sbpf::ebpf::ST_8B_IMM | solana_sbpf::ebpf::ST_8B_REG => fill_memory_access(dst_addr, 8, true),
 
                 _ => { }
             }
