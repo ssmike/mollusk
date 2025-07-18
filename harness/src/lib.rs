@@ -665,7 +665,7 @@ macro_rules! instr_syscall_stub {
                     memory_mapping,
                     invoke_context,
                 )?;
-                let (instruction_accounts, program_indices) =
+                let (instruction_accounts, _) =
                     invoke_context.prepare_instruction(&instruction, &signers)?;
 
                 TRACE_IN_PROGRESS.with_borrow_mut(|trace| {
@@ -674,7 +674,6 @@ macro_rules! instr_syscall_stub {
                         &instruction.program_id,
                         instruction.data.as_ref(),
                         &instruction_accounts,
-                        &program_indices,
                         invoke_context)
                 })?;
 
@@ -743,9 +742,11 @@ impl InstructionTrace {
         program_id: &Pubkey,
         instruction_data: &[u8],
         instruction_accounts: &[InstructionAccount],
-        program_indices: &[IndexOfAccount],
         invoke_context: &InvokeContext) -> Result<(), InstructionError>
     {
+
+        let program_indices = vec![invoke_context.transaction_context.find_index_of_account(program_id).unwrap()];
+
         let cache = &invoke_context.program_cache_for_tx_batch;
         let ctx = &invoke_context.transaction_context;
 
@@ -803,7 +804,7 @@ impl InstructionTrace {
         };
 
         let mut ictx = InstructionContext::default();
-        ictx.configure(program_indices, instruction_accounts, &instruction_data);
+        ictx.configure(program_indices.as_slice(), instruction_accounts, &instruction_data);
 
         let mask_out_rent_epoch_in_vm_serialization = runtime_features.mask_out_rent_epoch_in_vm_serialization;
 
@@ -1025,7 +1026,6 @@ impl Mollusk {
                         &instruction.program_id,
                         &instruction.data.as_slice(),
                         &instruction_accounts,
-                        &[program_id_index],
                         &invoke_context)
                         .unwrap();
                     Some(trace)
