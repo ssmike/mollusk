@@ -1,25 +1,16 @@
 //! Module for working with Solana programs.
 
 use {
-    agave_feature_set::FeatureSet,
-    solana_account::Account,
-    solana_bpf_loader_program::syscalls::create_program_runtime_environment_v1,
-    solana_compute_budget::compute_budget::ComputeBudget,
-    solana_loader_v3_interface::state::UpgradeableLoaderState,
-    solana_loader_v4_interface::state::{LoaderV4State, LoaderV4Status},
-    solana_program_runtime::{
+    crate::{SyscallInvokeSignedCStub, SyscallInvokeSignedRustStub}, agave_feature_set::FeatureSet, solana_account::Account, solana_bpf_loader_program::syscalls::create_program_runtime_environment_v1, solana_compute_budget::compute_budget::ComputeBudget, solana_loader_v3_interface::state::UpgradeableLoaderState, solana_loader_v4_interface::state::{LoaderV4State, LoaderV4Status}, solana_program_runtime::{
         invoke_context::{BuiltinFunctionWithContext, InvokeContext},
         loaded_programs::{LoadProgramMetrics, ProgramCacheEntry, ProgramCacheForTxBatch},
         solana_sbpf::program::BuiltinProgram,
-    },
-    solana_pubkey::Pubkey,
-    solana_rent::Rent,
-    std::{
+    }, solana_pubkey::Pubkey, solana_rent::Rent, std::{
         cell::{RefCell, RefMut},
         collections::HashMap,
         rc::Rc,
         sync::Arc,
-    },
+    }
 };
 
 /// Loader keys, re-exported from `solana_sdk` for convenience.
@@ -107,7 +98,8 @@ impl ProgramCache {
         // This might look rough, but it's actually functionally the same as
         // calling `create_program_runtime_environment_v1` on every addition.
         let environment = {
-            let config = self.program_runtime_environment.get_config().clone();
+            let mut config = self.program_runtime_environment.get_config().clone();
+            config.enable_instruction_tracing = true;
             let mut loader = BuiltinProgram::new_loader(config);
 
             for (_key, (name, value)) in self
@@ -116,7 +108,11 @@ impl ProgramCache {
                 .iter()
             {
                 let name = std::str::from_utf8(name).unwrap();
-                loader.register_function(name, value).unwrap();
+                match name {
+                    "sol_invoke_signed_c" => loader.register_function(name, SyscallInvokeSignedCStub::vm),
+                    "sol_invoke_signed_rust" => loader.register_function(name, SyscallInvokeSignedRustStub::vm),
+                    _ => loader.register_function(name, value)
+                }.unwrap();
             }
 
             Arc::new(loader)
